@@ -1,0 +1,23 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# PyTorch & Model Checkpoints
+*.pt
+*.pth
+*.bin
+
+# Streamlit Caches
+.streamlit/
+
+# OS / Editor files
+.vscode/
+.DS_Store
+Thumbs.db
