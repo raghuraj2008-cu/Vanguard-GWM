@@ -34,4 +34,4 @@ vanguard_gwm/
 │   └── world_model.py     # GAT encoder, Temporal Dynamics & Rollout engine
 ├── app.py                 # Offline Streamlit decision-support dashboard
 ├── requirements.txt       # Project dependencies
-└── README.md
+└── README.md# Vanguard-GWM
