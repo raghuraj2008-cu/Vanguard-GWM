@@ -24,6 +24,7 @@ st.markdown("""
         font-weight: 600 !important;
         font-size: 0.85rem !important;
     }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"],
     div[data-testid="stMetric"] div[data-testid="stMetricValue"] div {
         color: #38bdf8 !important;
         font-weight: 700 !important;
@@ -107,7 +108,11 @@ with col_left:
         color=alt.Color("Scenario:N", scale=alt.Scale(domain=["Unchecked Attack Trajectory", "Counterfactual (Quarantine Active)"], range=["#ef4444", "#10b981"])),
         tooltip=["Horizon Step", "Scenario", alt.Tooltip("Risk Probability:Q", format=".2%")]
     ).properties(height=320)
-    st.altair_chart(chart, width="stretch")
+    
+    try:
+        st.altair_chart(chart, width="stretch")
+    except TypeError:
+        st.altair_chart(chart, use_container_width=True)
 
 with col_right:
     st.subheader("🧪 'What-If' Defensive Policy Sandbox")
@@ -116,7 +121,11 @@ with col_right:
     else:
         st.markdown(f'<div class="risk-alert risk-low">✅ NOMINAL: Traffic patterns normal</div>', unsafe_allow_html=True)
         
-    isolate_clicked = st.button("⚡ Simulate Host Isolation (Graph Pruning)", width="stretch")
+    try:
+        isolate_clicked = st.button("⚡ Simulate Host Isolation (Graph Pruning)", width="stretch")
+    except TypeError:
+        isolate_clicked = st.button("⚡ Simulate Host Isolation (Graph Pruning)", use_container_width=True)
+        
     if isolate_clicked:
         st.success(f"Isolated Node: {target_node.split()[0]}")
         risk_reduction = (current_max_risk - mitigated_risk[-1]) * 100
@@ -131,7 +140,7 @@ with col_right:
 
 st.markdown("---")
 
-# Feature-Level Explainability (SIH PS MANDATE)
+# Feature-Level Explainability & Topology View
 col_exp1, col_exp2 = st.columns([1, 1])
 
 with col_exp1:
@@ -152,7 +161,11 @@ with col_exp1:
         y=alt.Y("Telemetry Feature:N", sort="-x", title="Extracted Attribute"),
         color=alt.value("#38bdf8")
     ).properties(height=220)
-    st.altair_chart(feat_chart, width="stretch")
+    
+    try:
+        st.altair_chart(feat_chart, width="stretch")
+    except TypeError:
+        st.altair_chart(feat_chart, use_container_width=True)
 
 with col_exp2:
     st.subheader("🌐 Monitored Network Graph Topology ($G_t$)")
@@ -164,4 +177,7 @@ with col_exp2:
         "IAT Var (ms²)": [0.002, 0.001, 14.2, 8.5, 0.1],
         "Anomaly Score": ["0.94 (Critical)", "0.88 (High)", "0.12 (Low)", "0.04 (Low)", "0.01 (Low)"]
     }
-    st.dataframe(pd.DataFrame(table_data), width="stretch")
+    try:
+        st.dataframe(pd.DataFrame(table_data), width="stretch")
+    except TypeError:
+        st.dataframe(pd.DataFrame(table_data), use_container_width=True)
