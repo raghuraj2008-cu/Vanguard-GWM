@@ -3,25 +3,35 @@ engine.py - Core Orchestration Engine for Vanguard-GWM
 Connects streaming telemetry, Graph World Model rollouts, and SDN enforcement.
 """
 import torch
-import numpy as np
 import logging
 from typing import Dict, List, Any
-from src.world_model import SpatialEncoder, DynamicsEngine, MultiTaskProjectionHead
+from src.world_model import GATv2SpatialEncoder, TemporalDynamicsTransformer, MultiTaskDecoder
 from src.sdn_enforcer import SDNEnforcer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger("Vanguard-Engine")
 
 class VanguardEngine:
-    def __init__(self, in_channels: int = 5, latent_dim: int = 64, horizon_k: int = 5, risk_threshold: float = 0.60):
+    def __init__(self, in_node_features: int = 5, in_edge_features: int = 5, latent_dim: int = 64, horizon_k: int = 5, risk_threshold: float = 0.60):
         self.latent_dim = latent_dim
         self.horizon_k = horizon_k
         self.risk_threshold = risk_threshold
         
-        # Neural Network Modules
-        self.spatial_encoder = SpatialEncoder(in_channels=in_channels, hidden_dim=latent_dim, out_dim=latent_dim)
-        self.dynamics_engine = DynamicsEngine(latent_dim=latent_dim, nhead=4, num_layers=2)
-        self.projection_head = MultiTaskProjectionHead(latent_dim=latent_dim, num_classes=5)
+        # Exact Neural Network Modules from src/world_model.py
+        self.spatial_encoder = GATv2SpatialEncoder(
+            in_node_features=in_node_features,
+            in_edge_features=in_edge_features,
+            latent_dim=latent_dim
+        )
+        self.dynamics_transformer = TemporalDynamicsTransformer(
+            latent_dim=latent_dim,
+            nhead=4,
+            num_layers=2
+        )
+        self.decoder = MultiTaskDecoder(
+            latent_dim=latent_dim,
+            num_mitre_stages=5
+        )
         
         # Closed-Loop Enforcement
         self.sdn_enforcer = SDNEnforcer()
@@ -29,33 +39,41 @@ class VanguardEngine:
 
     def process_graph_snapshot(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor, target_ip: str) -> Dict[str, Any]:
         """
-        Processes snapshot G_t, computes forward latent rollout, and checks mitigation thresholds.
+        Processes snapshot G_t, computes forward latent rollout, and evaluates mitigation thresholds.
         """
         self.spatial_encoder.eval()
-        self.dynamics_engine.eval()
-        self.projection_head.eval()
+        self.dynamics_transformer.eval()
+        self.decoder.eval()
 
         with torch.no_grad():
             # 1. Spatial Perception (G_t -> z_t)
-            z_t = self.spatial_encoder(x, edge_index, edge_attr)
-            z_t_pooled = torch.mean(z_t, dim=0, keepdim=True)
-            self.history_buffer.append(z_t_pooled)
+            z_nodes, z_graph = self.spatial_encoder(x, edge_index, edge_attr)
             
+            # z_graph shape: [1, latent_dim]
+            if z_graph.dim() == 1:
+                z_graph = z_graph.unsqueeze(0)
+                
+            self.history_buffer.append(z_graph)
             if len(self.history_buffer) > 8:
                 self.history_buffer.pop(0)
 
             # 2. Transition Dynamics Rollout [z_t+1 ... z_t+K]
-            trajectory_context = torch.stack(self.history_buffer, dim=0)
-            rollout_latents = self.dynamics_engine.rollout(trajectory_context, steps=self.horizon_k)
+            # Stack along sequence dimension: shape [1, seq_len, latent_dim]
+            context_seq = torch.cat(self.history_buffer, dim=0).unsqueeze(0)
+            rollout_latents = self.dynamics_transformer.predict_rollout(context_seq, k_steps=self.horizon_k)
 
-            # 3. Multi-Task Projections
+            # 3. Multi-Task Projections across the trajectory
             risk_scores = []
             phase_predictions = []
             
-            for z_hat in rollout_latents:
-                risk, phase_logits = self.projection_head(z_hat)
-                risk_scores.append(risk.item())
-                phase_predictions.append(int(torch.argmax(phase_logits, dim=-1).item()))
+            for k_idx in range(self.horizon_k):
+                z_hat = rollout_latents[:, k_idx, :] # [1, latent_dim]
+                preds = self.decoder(z_hat)
+                risk_val = preds["risk_score"].item()
+                stage_idx = int(torch.argmax(preds["mitre_stage_logits"], dim=-1).item())
+                
+                risk_scores.append(float(risk_val))
+                phase_predictions.append(stage_idx)
 
             peak_risk = max(risk_scores)
             stages = ["Benign Baseline", "Reconnaissance", "Initial Access", "Lateral Movement", "Exfiltration"]
@@ -70,7 +88,7 @@ class VanguardEngine:
             return {
                 "target_ip": target_ip,
                 "current_stage": current_stage,
-                "peak_risk": peak_risk,
-                "risk_trajectory": risk_scores,
+                "peak_risk": round(peak_risk, 4),
+                "risk_trajectory": [round(r, 4) for r in risk_scores],
                 "sdn_quarantine_enforced": enforcement_triggered
             }
