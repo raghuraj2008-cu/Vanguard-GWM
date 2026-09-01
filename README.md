@@ -3,7 +3,7 @@
 <p align="center">
   <img src="assets/demo.png" alt="Vanguard-GWM Live Dashboard Demo" width="100%">
 </p>
-
+📄 **Read the Full IEEE Research Manuscript:** [Vanguard_GWM_Research_Paper.pdf](./Vanguard_GWM_Research_Paper.pdf)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-Geometric-ee4c2c.svg)](https://pytorch.org/)
