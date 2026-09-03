@@ -1,1 +1,8 @@
-
+streamlit
+numpy
+pandas
+altair
+scikit-learn
+torch
+torch-geometric
+requests
