@@ -1,183 +1,776 @@
-import streamlit as st
-import numpy as np
-import pandas as pd
+import time
+
 import altair as alt
+import pandas as pd
+import streamlit as st
+import torch
+
+from src.data_pipeline import StreamingTelemetryParser
+from src.engine import VanguardEngine
+
+
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
     page_title="Vanguard-GWM | SIH Threat Forecasting SOC",
     page_icon="🛡️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Custom High-Contrast Professional Theme
-st.markdown("""
-<style>
-    div[data-testid="stMetric"] {
-        background-color: #0f172a !important;
-        border: 1px solid #334155 !important;
-        border-radius: 10px !important;
-        padding: 14px 18px !important;
-    }
-    div[data-testid="stMetric"] label, div[data-testid="stMetric"] label p {
-        color: #94a3b8 !important;
-        font-weight: 600 !important;
-        font-size: 0.85rem !important;
-    }
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"],
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"] div {
-        color: #38bdf8 !important;
-        font-weight: 700 !important;
-        font-size: 1.6rem !important;
-    }
-    .risk-alert {
-        padding: 12px 14px;
-        border-radius: 8px;
-        font-weight: 600;
-        margin-bottom: 12px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    .risk-high { background-color: #450a0a; color: #fecaca; border: 1px solid #dc2626; }
-    .risk-low { background-color: #064e3b; color: #a7f3d0; border: 1px solid #059669; }
-</style>
-""", unsafe_allow_html=True)
+
+# ============================================================
+# CUSTOM PROFESSIONAL THEME
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+        div[data-testid="stMetric"] {
+            background-color: #0f172a !important;
+            border: 1px solid #334155 !important;
+            border-radius: 10px !important;
+            padding: 14px 18px !important;
+        }
+
+        div[data-testid="stMetric"] label,
+        div[data-testid="stMetric"] label p {
+            color: #94a3b8 !important;
+            font-weight: 600 !important;
+            font-size: 0.85rem !important;
+        }
+
+        div[data-testid="stMetric"] div[data-testid="stMetricValue"],
+        div[data-testid="stMetric"] div[data-testid="stMetricValue"] div {
+            color: #38bdf8 !important;
+            font-weight: 700 !important;
+            font-size: 1.6rem !important;
+        }
+
+        .risk-alert {
+            padding: 12px 14px;
+            border-radius: 8px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .risk-high {
+            background-color: #450a0a;
+            color: #fecaca;
+            border: 1px solid #dc2626;
+        }
+
+        .risk-low {
+            background-color: #064e3b;
+            color: #a7f3d0;
+            border: 1px solid #059669;
+        }
+
+        .info-box {
+            background-color: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 12px 14px;
+            margin-bottom: 10px;
+        }
+
+        .small-label {
+            color: #94a3b8;
+            font-size: 0.82rem;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# HEADER
+# ============================================================
 
 st.title("🛡️ Vanguard-GWM: Generative Graph World Model")
-st.caption("SIH Project: AI-Based Network Attack Forecasting from Network Telemetry & World Models")
 
-# Sidebar Controls & File Upload
+st.caption(
+    "SIH Project: AI-Based Network Attack Forecasting "
+    "from Network Telemetry & World Models"
+)
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
 st.sidebar.header("📁 Ingestion & Simulation Controls")
-uploaded_file = st.sidebar.file_uploader("Upload CIC-IDS-2018 / PCAP / CSV Telemetry", type=["csv", "pcap"])
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload CIC-IDS-2018 / PCAP / CSV Telemetry",
+    type=["csv", "pcap"],
+)
 
 if uploaded_file is not None:
     st.sidebar.success(f"Loaded: {uploaded_file.name}")
+    st.sidebar.caption(
+        "Upload ingestion is currently reserved for the telemetry "
+        "integration layer. The dashboard currently uses the "
+        "deterministic synthetic graph generator."
+    )
 
-horizon_k = st.sidebar.slider("Forecast Horizon (K-steps ahead)", min_value=1, max_value=8, value=5)
-selected_window = st.sidebar.slider("Temporal Slice Index (t)", min_value=0, max_value=20, value=8)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("🎯 Active Inspection Target")
-target_node = st.sidebar.selectbox(
-    "Target Host Node",
-    ["192.168.1.105 (Web Server)", "192.168.1.110 (DB Server)", "10.0.0.5 (Domain Controller)", "10.0.0.22 (Dev Workstation)"]
+horizon_k = st.sidebar.slider(
+    "Forecast Horizon (K-steps ahead)",
+    min_value=1,
+    max_value=8,
+    value=5,
 )
 
-# World Model Rollout Logic
+selected_window = st.sidebar.slider(
+    "Temporal Slice Index (t)",
+    min_value=0,
+    max_value=20,
+    value=8,
+)
+
+st.sidebar.markdown("---")
+
+st.sidebar.subheader("🎯 Active Inspection Target")
+
+target_node = st.sidebar.selectbox(
+    "Target Host Node",
+    [
+        "192.168.1.105 (Web Server)",
+        "192.168.1.110 (DB Server)",
+        "10.0.0.5 (Domain Controller)",
+        "10.0.0.22 (Dev Workstation)",
+    ],
+)
+
+target_ip = target_node.split()[0]
+
+
+# ============================================================
+# MODEL INITIALIZATION
+# ============================================================
+
+@st.cache_resource
+def get_vanguard_engine(horizon: int):
+    """
+    Creates and caches the Vanguard-GWM inference engine.
+
+    The model architecture is instantiated from the actual
+    Vanguard-GWM source code rather than using dashboard-only
+    prediction logic.
+    """
+    return VanguardEngine(
+        in_node_features=5,
+        in_edge_features=5,
+        latent_dim=64,
+        horizon_k=horizon,
+        risk_threshold=0.60,
+    )
+
+
+# ============================================================
+# SYNTHETIC GRAPH GENERATION
+# ============================================================
+
 @st.cache_data
-def get_world_model_trajectory(t_idx, k_steps):
-    np.random.seed(42 + t_idx)
-    base_risk = min(0.95, 0.15 + (t_idx * 0.04))
-    future_steps = [f"t+{k}" for k in range(1, k_steps + 1)]
-    predicted_risk = [min(0.99, base_risk + (k * 0.07) + np.random.normal(0, 0.02)) for k in range(1, k_steps + 1)]
-    mitigated_risk = [max(0.08, r * 0.28) for r in predicted_risk]
-    stages = ["Benign Baseline", "Reconnaissance", "Initial Access", "Lateral Movement", "Exfiltration"]
-    stage_idx = min(len(stages) - 1, int(base_risk * 4.5))
-    return future_steps, predicted_risk, mitigated_risk, stages[stage_idx]
+def generate_graph_snapshot(window_index: int):
+    """
+    Generate a deterministic synthetic graph snapshot.
 
-future_steps, predicted_risk, mitigated_risk, current_stage = get_world_model_trajectory(selected_window, horizon_k)
-current_max_risk = predicted_risk[-1]
+    The current repository contains a synthetic telemetry
+    generator rather than a trained production telemetry
+    ingestion pipeline.
+    """
+    torch.manual_seed(42 + window_index)
 
-# Top KPI Metric Row
+    parser = StreamingTelemetryParser(
+        window_size_sec=2.0,
+    )
+
+    graph = parser.synthesize_mock_window(
+        num_nodes=12,
+        num_edges=28,
+    )
+
+    return (
+        graph.x,
+        graph.edge_index,
+        graph.edge_attr,
+    )
+
+
+# ============================================================
+# VANGUARD-GWM INFERENCE
+# ============================================================
+
+def run_vanguard_inference(
+    window_index: int,
+    horizon: int,
+    target: str,
+):
+    """
+    Execute the actual VanguardEngine inference pipeline.
+
+    Returns:
+        result: Engine prediction dictionary
+        latency_ms: Measured local inference latency
+    """
+
+    engine = get_vanguard_engine(horizon)
+
+    x, edge_index, edge_attr = generate_graph_snapshot(
+        window_index
+    )
+
+    start_time = time.perf_counter()
+
+    result = engine.process_graph_snapshot(
+        x=x,
+        edge_index=edge_index,
+        edge_attr=edge_attr,
+        target_ip=target,
+    )
+
+    latency_ms = (
+        time.perf_counter() - start_time
+    ) * 1000.0
+
+    return result, latency_ms
+
+
+# ============================================================
+# RUN INFERENCE
+# ============================================================
+
+try:
+    result, inference_latency_ms = run_vanguard_inference(
+        selected_window,
+        horizon_k,
+        target_ip,
+    )
+
+    predicted_risk = result["risk_trajectory"]
+    current_max_risk = result["peak_risk"]
+    current_stage = result["current_stage"]
+
+except Exception as exc:
+    st.error(
+        "Vanguard-GWM inference failed. "
+        "Check the Python environment and model dependencies."
+    )
+
+    st.exception(exc)
+
+    st.stop()
+
+
+# ============================================================
+# FORECAST AXIS
+# ============================================================
+
+future_steps = [
+    f"t+{k * 2}s"
+    for k in range(1, horizon_k + 1)
+]
+
+
+# ============================================================
+# COUNTERFACTUAL MITIGATION SCENARIO
+# ============================================================
+
+# IMPORTANT:
+# This is NOT a second model prediction.
+# It is a simple counterfactual visualization showing what
+# reduced risk could look like after quarantine.
+
+mitigated_risk = [
+    max(0.05, risk * 0.28)
+    for risk in predicted_risk
+]
+
+
+# ============================================================
+# TOP KPI ROW
+# ============================================================
+
 col1, col2, col3, col4 = st.columns(4)
+
+
 with col1:
-    st.metric("Predicted Peak Risk", f"{current_max_risk * 100:.1f}%", delta=f"{'+' if current_max_risk > 0.5 else '-'}{abs(current_max_risk - 0.2)*100:.1f}% vs baseline", delta_color="inverse")
+    risk_delta = (
+        current_max_risk - 0.20
+    ) * 100
+
+    st.metric(
+        "Predicted Peak Risk",
+        f"{current_max_risk * 100:.1f}%",
+        delta=f"{risk_delta:+.1f}% vs reference",
+        delta_color="inverse",
+    )
+
+
 with col2:
-    st.metric("MITRE ATT&CK Phase", current_stage)
+    st.metric(
+        "MITRE ATT&CK Phase",
+        current_stage,
+    )
+
+
 with col3:
-    st.metric("Predictive Lead Time", f"+{horizon_k * 5}s (Live)", delta="Proactive Window")
+    st.metric(
+        "Forecast Horizon",
+        f"{horizon_k} steps",
+        delta="2s / step",
+    )
+
+
 with col4:
-    st.metric("Model Inference Latency", f"{12.4 + horizon_k * 4.8:.1f} ms", delta="Sub-50ms Budget")
+    st.metric(
+        "Model Inference Latency",
+        f"{inference_latency_ms:.2f} ms",
+        delta="Measured locally",
+    )
+
 
 st.markdown("---")
 
-# Main Section: Forecast vs What-If Sandbox
+
+# ============================================================
+# MAIN FORECAST + DEFENSIVE SANDBOX
+# ============================================================
+
 col_left, col_right = st.columns([3, 2])
 
+
+# ============================================================
+# FORECAST CURVE
+# ============================================================
+
 with col_left:
-    st.subheader("📈 Autoregressive K-Step Risk Forecast Curve")
-    chart_df = pd.DataFrame({
-        "Horizon Step": future_steps + future_steps,
-        "Risk Probability": predicted_risk + mitigated_risk,
-        "Scenario": ["Unchecked Attack Trajectory"] * horizon_k + ["Counterfactual (Quarantine Active)"] * horizon_k
-    })
-    chart = alt.Chart(chart_df).mark_line(point=True).encode(
-        x=alt.X("Horizon Step:N", title="Projected Future Steps (Δt = 5s)"),
-        y=alt.Y("Risk Probability:Q", title="System Infiltration Risk", scale=alt.Scale(domain=[0, 1])),
-        color=alt.Color("Scenario:N", scale=alt.Scale(domain=["Unchecked Attack Trajectory", "Counterfactual (Quarantine Active)"], range=["#ef4444", "#10b981"])),
-        tooltip=["Horizon Step", "Scenario", alt.Tooltip("Risk Probability:Q", format=".2%")]
-    ).properties(height=320)
-    
+
+    st.subheader(
+        "📈 Autoregressive K-Step Risk Forecast Curve"
+    )
+
+    chart_df = pd.DataFrame(
+        {
+            "Horizon Step": (
+                future_steps + future_steps
+            ),
+            "Risk Probability": (
+                predicted_risk + mitigated_risk
+            ),
+            "Scenario": (
+                ["Model Forecast"] * horizon_k
+                +
+                ["Counterfactual (Quarantine Active)"]
+                * horizon_k
+            ),
+        }
+    )
+
+    chart = (
+        alt.Chart(chart_df)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X(
+                "Horizon Step:N",
+                title="Projected Future Steps (Δt = 2s)",
+            ),
+            y=alt.Y(
+                "Risk Probability:Q",
+                title="Model Risk Score",
+                scale=alt.Scale(domain=[0, 1]),
+            ),
+            color=alt.Color(
+                "Scenario:N",
+                scale=alt.Scale(
+                    domain=[
+                        "Model Forecast",
+                        "Counterfactual (Quarantine Active)",
+                    ],
+                    range=[
+                        "#ef4444",
+                        "#10b981",
+                    ],
+                ),
+            ),
+            tooltip=[
+                "Horizon Step",
+                "Scenario",
+                alt.Tooltip(
+                    "Risk Probability:Q",
+                    format=".2%",
+                ),
+            ],
+        )
+        .properties(height=320)
+    )
+
     try:
-        st.altair_chart(chart, width="stretch")
+        st.altair_chart(
+            chart,
+            width="stretch",
+        )
     except TypeError:
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(
+            chart,
+            use_container_width=True,
+        )
+
+    st.caption(
+        "The red trajectory is produced by the current "
+        "Vanguard-GWM model. The green trajectory is a "
+        "counterfactual quarantine visualization."
+    )
+
+
+# ============================================================
+# DEFENSIVE POLICY SANDBOX
+# ============================================================
 
 with col_right:
-    st.subheader("🧪 'What-If' Defensive Policy Sandbox")
+
+    st.subheader(
+        "🧪 'What-If' Defensive Policy Sandbox"
+    )
+
     if current_max_risk >= 0.60:
-        st.markdown(f'<div class="risk-alert risk-high">⚠️ HIGH THREAT: Infiltration progression on {target_node.split()[0]}</div>', unsafe_allow_html=True)
+
+        st.markdown(
+            f"""
+            <div class="risk-alert risk-high">
+                ⚠️ HIGH THREAT: Elevated model risk for
+                {target_ip}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     else:
-        st.markdown(f'<div class="risk-alert risk-low">✅ NOMINAL: Traffic patterns normal</div>', unsafe_allow_html=True)
-        
+
+        st.markdown(
+            f"""
+            <div class="risk-alert risk-low">
+                ✅ NOMINAL: Model risk below enforcement threshold
+                for {target_ip}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
     try:
-        isolate_clicked = st.button("⚡ Simulate Host Isolation (Graph Pruning)", width="stretch")
+
+        isolate_clicked = st.button(
+            "⚡ Simulate Host Isolation (Graph Pruning)",
+            width="stretch",
+        )
+
     except TypeError:
-        isolate_clicked = st.button("⚡ Simulate Host Isolation (Graph Pruning)", use_container_width=True)
-        
+
+        isolate_clicked = st.button(
+            "⚡ Simulate Host Isolation (Graph Pruning)",
+            use_container_width=True,
+        )
+
+
     if isolate_clicked:
-        st.success(f"Isolated Node: {target_node.split()[0]}")
-        risk_reduction = (current_max_risk - mitigated_risk[-1]) * 100
-        st.metric("Projected Risk Reduction (ΔRisk)", f"-{risk_reduction:.1f}%", delta="Threat Neutralized")
+
+        st.success(
+            f"Isolation simulation requested for {target_ip}"
+        )
+
+        risk_reduction = max(
+            0.0,
+            (
+                current_max_risk
+                - mitigated_risk[-1]
+            ) * 100,
+        )
+
+        st.metric(
+            "Projected Risk Reduction",
+            f"-{risk_reduction:.1f}%",
+            delta="Counterfactual simulation",
+        )
+
         try:
+
             from src.sdn_enforcer import SDNEnforcer
+
             enforcer = SDNEnforcer()
-            enforcer.push_quarantine_rule(target_ip=target_node.split()[0])
-            st.caption("✅ OpenFlow 1.3 DROP flow-mod rule staged and verified.")
-        except Exception:
-            st.caption("✅ Counterfactual simulation completed.")
+
+            enforcement_result = (
+                enforcer.push_quarantine_rule(
+                    target_ip=target_ip
+                )
+            )
+
+            if enforcement_result:
+
+                st.caption(
+                    "✅ SDN quarantine action accepted by "
+                    "the enforcement layer or simulation fallback."
+                )
+
+            else:
+
+                st.caption(
+                    "⚠️ SDN controller rejected the quarantine rule."
+                )
+
+        except Exception as exc:
+
+            st.caption(
+                "⚠️ SDN enforcement unavailable: "
+                f"{type(exc).__name__}"
+            )
+
 
 st.markdown("---")
 
-# Feature-Level Explainability & Topology View
+
+# ============================================================
+# MODEL CONFIGURATION + TELEMETRY FEATURES
+# ============================================================
+
 col_exp1, col_exp2 = st.columns([1, 1])
 
+
+# ============================================================
+# MODEL CONFIGURATION
+# ============================================================
+
 with col_exp1:
-    st.subheader("🔍 Attention-Based Feature Attribution (Explainability)")
-    st.caption("Relative weight of packet & flow features driving the World Model transition forecast:")
-    feature_importance = pd.DataFrame({
-        "Telemetry Feature": [
-            "IAT Variance (Packet Timing)",
-            "TCP SYN/ACK Flag Sequence",
-            "Port Scan Entropy",
-            "TTL Jitter / Variance",
-            "Flow Volume Ratio (Out/In)"
-        ],
-        "Attention Weight": [0.34, 0.28, 0.19, 0.12, 0.07]
-    })
-    feat_chart = alt.Chart(feature_importance).mark_bar().encode(
-        x=alt.X("Attention Weight:Q", title="Relative Attribution Score (0-1)"),
-        y=alt.Y("Telemetry Feature:N", sort="-x", title="Extracted Attribute"),
-        color=alt.value("#38bdf8")
-    ).properties(height=220)
-    
+
+    st.subheader(
+        "🧠 Vanguard-GWM Model Configuration"
+    )
+
+    st.caption(
+        "Configuration of the model components used for "
+        "the current inference request."
+    )
+
+    model_config = pd.DataFrame(
+        {
+            "Component": [
+                "Node features",
+                "Edge features",
+                "Latent dimension",
+                "Transformer layers",
+                "Forecast horizon",
+                "History buffer",
+            ],
+            "Value": [
+                "5",
+                "5",
+                "64",
+                "2",
+                str(horizon_k),
+                "8 snapshots",
+            ],
+        }
+    )
+
     try:
-        st.altair_chart(feat_chart, width="stretch")
+
+        st.dataframe(
+            model_config,
+            hide_index=True,
+            width="stretch",
+        )
+
     except TypeError:
-        st.altair_chart(feat_chart, use_container_width=True)
+
+        st.dataframe(
+            model_config,
+            hide_index=True,
+            use_container_width=True,
+        )
+
+    st.info(
+        "The current model is an architecture-level inference "
+        "pipeline operating on synthetic telemetry graphs. "
+        "Risk scores should not be interpreted as calibrated "
+        "real-world attack probabilities until trained and "
+        "validated on representative data."
+    )
+
+
+# ============================================================
+# TELEMETRY FEATURE OVERVIEW
+# ============================================================
 
 with col_exp2:
-    st.subheader("🌐 Monitored Network Graph Topology ($G_t$)")
-    table_data = {
-        "Source IP": ["192.168.1.105", "192.168.1.105", "10.0.0.5", "172.16.0.4", "192.168.1.200"],
-        "Destination IP": ["10.0.0.5", "192.168.1.110", "10.0.0.22", "192.168.1.105", "8.8.8.8"],
-        "Protocol": ["TCP / 445 (SMB)", "TCP / 3389 (RDP)", "TCP / 88 (Kerb)", "TCP / 443", "UDP / 53"],
-        "Flag Vector": ["[SYN, ACK]", "[SYN]", "[ACK, PSH]", "[ACK]", "[None]"],
-        "IAT Var (ms²)": [0.002, 0.001, 14.2, 8.5, 0.1],
-        "Anomaly Score": ["0.94 (Critical)", "0.88 (High)", "0.12 (Low)", "0.04 (Low)", "0.01 (Low)"]
-    }
+
+    st.subheader(
+        "🔍 Telemetry Feature Overview"
+    )
+
+    st.caption(
+        "Input features consumed by the graph encoder."
+    )
+
+    feature_df = pd.DataFrame(
+        {
+            "Telemetry Feature": [
+                "In-Degree",
+                "Out-Degree",
+                "Average Bytes",
+                "Port Entropy",
+                "Role ID",
+            ],
+            "Representation": [
+                "Node feature",
+                "Node feature",
+                "Node feature",
+                "Node feature",
+                "Node feature",
+            ],
+        }
+    )
+
     try:
-        st.dataframe(pd.DataFrame(table_data), width="stretch")
+
+        st.dataframe(
+            feature_df,
+            hide_index=True,
+            width="stretch",
+        )
+
     except TypeError:
-        st.dataframe(pd.DataFrame(table_data), use_container_width=True)
+
+        st.dataframe(
+            feature_df,
+            hide_index=True,
+            use_container_width=True,
+        )
+
+    st.caption(
+        "Edge attributes additionally include flag bitmask, "
+        "log bytes, inter-arrival-time mean, inter-arrival-time "
+        "variance, and TTL variance."
+    )
+
+
+st.markdown("---")
+
+
+# ============================================================
+# NETWORK GRAPH TOPOLOGY
+# ============================================================
+
+st.subheader(
+    "🌐 Monitored Network Graph Topology ($G_t$)"
+)
+
+table_data = {
+    "Source IP": [
+        "192.168.1.105",
+        "192.168.1.105",
+        "10.0.0.5",
+        "172.16.0.4",
+        "192.168.1.200",
+    ],
+    "Destination IP": [
+        "10.0.0.5",
+        "192.168.1.110",
+        "10.0.0.22",
+        "192.168.1.105",
+        "8.8.8.8",
+    ],
+    "Protocol": [
+        "TCP / 445 (SMB)",
+        "TCP / 3389 (RDP)",
+        "TCP / 88 (Kerb)",
+        "TCP / 443",
+        "UDP / 53",
+    ],
+    "Flag Vector": [
+        "[SYN, ACK]",
+        "[SYN]",
+        "[ACK, PSH]",
+        "[ACK]",
+        "[None]",
+    ],
+    "IAT Var (ms²)": [
+        0.002,
+        0.001,
+        14.2,
+        8.5,
+        0.1,
+    ],
+    "Anomaly Score": [
+        "0.94 (Critical)",
+        "0.88 (High)",
+        "0.12 (Low)",
+        "0.04 (Low)",
+        "0.01 (Low)",
+    ],
+}
+
+topology_df = pd.DataFrame(table_data)
+
+try:
+
+    st.dataframe(
+        topology_df,
+        hide_index=True,
+        width="stretch",
+    )
+
+except TypeError:
+
+    st.dataframe(
+        topology_df,
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
+# ============================================================
+# SYSTEM STATUS
+# ============================================================
+
+st.markdown("---")
+
+st.subheader("🟢 System Status")
+
+status_col1, status_col2, status_col3 = st.columns(3)
+
+
+with status_col1:
+
+    st.metric(
+        "Telemetry Graph",
+        "Synthetic",
+    )
+
+
+with status_col2:
+
+    st.metric(
+        "Inference Engine",
+        "Online",
+    )
+
+
+with status_col3:
+
+    st.metric(
+        "SDN Enforcement",
+        "Available",
+    )
+
+
+st.caption(
+    "Vanguard-GWM dashboard | Synthetic telemetry mode | "
+    "Model inference executed locally"
+)
